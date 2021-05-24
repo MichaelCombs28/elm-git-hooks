@@ -1,0 +1,3 @@
+yarn.lock binary
+dist/** binary
+.yarn/** binary
