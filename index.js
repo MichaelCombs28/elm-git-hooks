@@ -12,38 +12,43 @@ exec("git rev-parse --abbrev-ref HEAD", (error, stdout) => {
     },
   });
 
-  program.ports.print?.subscribe((message) => {
-    console.log(message);
-  });
-
-  program.ports.printAndExitFailure.subscribe((message) => {
-    console.error(message);
-    process.exit(1);
-  });
-
-  program.ports.printAndExitSuccess.subscribe((message) => {
-    console.log(message);
-    process.exit(0);
-  });
-
-  program.ports.os?.subscribe(({ commandType, args }) => {
+  program.ports.toJS.subscribe(({ commandType, args }) => {
     switch (commandType) {
-      case "readFile":
-        program.ports.osResult.send({
+      case "readFile": {
+        const { filename } = args;
+        program.ports.fromJS.send({
           commandType: "readFile",
           args: {
-            text: fs.readFileSync(args.filename).toString(),
-            filename: args.filename,
+            text: fs.readFileSync(filename).toString(),
+            filename: filename,
           },
         });
-        break;
-      case "writeFile":
-        fs.writeFileSync(args.filename, args.text);
-        program.ports.osResult.send({
+        return;
+      }
+      case "writeFile": {
+        const { filename, text } = args;
+        fs.writeFileSync(filename, text);
+        program.ports.fromJS.send({
           commandType: "writeFile",
           args: {},
         });
-        break;
+        return;
+      }
+      case "exitFailure": {
+        const { message } = args;
+        console.error(message);
+        process.exit(1);
+      }
+      case "exitSuccess": {
+        const { message } = args;
+        console.log(message);
+        process.exit(0);
+      }
+      case "print": {
+        const { message } = args;
+        console.log(message);
+        return;
+      }
     }
   });
 });

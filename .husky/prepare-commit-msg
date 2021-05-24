@@ -1,0 +1,4 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+./dist/elm-git-hooks prepare-message 'CU-[a-z0-9]{6}' $1 $2

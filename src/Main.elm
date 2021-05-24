@@ -1,7 +1,8 @@
 port module Main exposing (main)
 
 import Cli.Option as Option
-import Cli.OptionsParser as OptionsParser exposing (with, withDoc, withOptionalPositionalArg)
+import Cli.OptionsParser as OptionsParser exposing (OptionsParser, with, withDoc, withOptionalPositionalArg)
+import Cli.OptionsParser.BuilderState as BuilderState
 import Cli.Program as Program
 import Json.Decode as JD
 import Json.Encode as JE
@@ -12,43 +13,68 @@ import Regex exposing (Regex)
 -- PORTS
 
 
-port print : String -> Cmd msg
+port toJS : ElmMessage -> Cmd msg
 
 
-port printAndExitFailure : String -> Cmd msg
+port fromJS : (JSMessage -> msg) -> Sub msg
 
 
-port printAndExitSuccess : String -> Cmd msg
-
-
-port onStdinLine : (String -> msg) -> Sub msg
-
-
-port onStdinClosed : (() -> msg) -> Sub msg
-
-
-port os : OSCommand -> Cmd msg
-
-
-port osResult : (OSResult -> msg) -> Sub msg
-
-
-type alias OSCommand =
+type alias ElmMessage =
     { commandType : String
     , args : JE.Value
     }
 
 
-type alias OSResult =
+type alias JSMessage =
     { commandType : String
     , args : JE.Value
     }
 
 
-type alias ReadResult =
-    { filename : String
-    , text : String
-    }
+printAndExitFailure : String -> Cmd msg
+printAndExitFailure message =
+    toJS
+        { commandType = "exitFailure"
+        , args = JE.object [ ( "message", JE.string <| errorString message ) ]
+        }
+
+
+printAndExitSuccess : String -> Cmd msg
+printAndExitSuccess message =
+    toJS
+        { commandType = "exitSuccess"
+        , args = JE.object [ ( "message", JE.string <| successString message ) ]
+        }
+
+
+print : String -> Cmd msg
+print message =
+    toJS
+        { commandType = "print"
+        , args = JE.object [ ( "message", JE.string <| successString message ) ]
+        }
+
+
+readFile : String -> Cmd Msg
+readFile filename =
+    toJS
+        { commandType = "readFile"
+        , args =
+            JE.object
+                [ ( "filename", JE.string filename ) ]
+        }
+
+
+writeFile : String -> String -> String -> Cmd Msg
+writeFile ticketId filename text =
+    toJS
+        { commandType = "writeFile"
+        , args =
+            JE.object
+                [ ( "filename", JE.string filename )
+                , ( "text", JE.string <| ticketId ++ ":" ++ text )
+                ]
+        }
 
 
 
@@ -59,15 +85,19 @@ type alias Flags =
     Program.FlagsIncludingArgv RevFlag
 
 
-type alias Model =
-    Maybe String
+type Model
+    = Prep (Maybe String)
 
 
-type alias CliOptions =
+type alias PrepareOptions =
     { regex : String
     , commitMsgFile : String
     , commitSource : Maybe String
     }
+
+
+type CliOptions
+    = Prepare PrepareOptions
 
 
 type alias RevFlag =
@@ -82,13 +112,16 @@ type alias RevFlag =
 program : Program.Config CliOptions
 program =
     Program.config
-        |> Program.add
-            (OptionsParser.build CliOptions
-                |> with (Option.requiredPositionalArg "ticket-regex")
-                |> with (Option.requiredPositionalArg "commit-message-file")
-                |> withOptionalPositionalArg (Option.optionalPositionalArg "commit-source?")
-                |> withDoc "Preappend commit message with a ticket ID."
-            )
+        |> Program.add (OptionsParser.map Prepare prepareOptionsParser)
+
+
+prepareOptionsParser : OptionsParser PrepareOptions BuilderState.NoBeginningOptions
+prepareOptionsParser =
+    OptionsParser.buildSubCommand "prepare-message" PrepareOptions
+        |> with (Option.requiredPositionalArg "ticket-regex")
+        |> with (Option.requiredPositionalArg "commit-message-file")
+        |> withOptionalPositionalArg (Option.optionalPositionalArg "commit-source?")
+        |> withDoc "Preappend commit message with a ticket ID."
 
 
 
@@ -96,91 +129,76 @@ program =
 
 
 type Msg
-    = FromOS OSResult
+    = FromJS JSMessage
 
 
 update : CliOptions -> Msg -> Model -> ( Model, Cmd Msg )
 update cliOptions msg model =
     case msg of
-        FromOS res ->
+        FromJS res ->
             case res.commandType of
                 "readFile" ->
-                    let
-                        result =
-                            JD.decodeValue
-                                (JD.map2 ReadResult
-                                    (JD.field "filename" JD.string)
-                                    (JD.field "text" JD.string)
-                                )
-                                res.args
-                    in
-                    case result of
-                        Ok { filename, text } ->
-                            case model of
-                                Just ticketId ->
-                                    ( model, writeFile ticketId filename text )
-
-                                Nothing ->
-                                    ( model, printAndExitFailure (errorString "No Ticket ID") )
-
-                        Err e ->
-                            ( model, printAndExitFailure (errorString "Internal script error") )
+                    case model of
+                        Prep ticket ->
+                            ticket
+                                |> Maybe.map
+                                    (\ticketId ->
+                                        JD.decodeValue
+                                            (JD.map2 (writeFile ticketId)
+                                                (JD.field "filename" JD.string)
+                                                (JD.field "text" JD.string)
+                                            )
+                                            res.args
+                                            |> Result.map (Tuple.pair model)
+                                            |> Result.withDefault
+                                                ( model
+                                                , printAndExitFailure "Invalid value received from JS."
+                                                )
+                                    )
+                                |> Maybe.withDefault
+                                    ( model
+                                    , printAndExitFailure "Internal script error, no ticket ID"
+                                    )
 
                 "writeFile" ->
                     ( model, printAndExitSuccess "" )
 
                 _ ->
-                    ( model, printAndExitFailure (errorString "Unhandled OS result") )
+                    ( model
+                    , "Unhandled message from JS"
+                        ++ res.commandType
+                        |> printAndExitFailure
+                    )
 
 
 init : Flags -> CliOptions -> ( Model, Cmd Msg )
-init { rev } { regex, commitMsgFile, commitSource } =
-    case commitSource of
-        Just _ ->
-            ( Nothing, print "Commit Source present, omitting" )
+init { rev } opts =
+    case opts of
+        Prepare { regex, commitMsgFile, commitSource } ->
+            case commitSource of
+                Just _ ->
+                    ( Prep Nothing, print "Commit Source present, omitting" )
 
-        Nothing ->
-            "^.*("
-                ++ regex
-                ++ "+).*"
-                |> Regex.fromString
-                |> Maybe.map (findAndWrite commitMsgFile rev)
-                |> Maybe.withDefault ( Nothing, printAndExitFailure (errorString "Invalid regex.") )
+                Nothing ->
+                    "^.*("
+                        ++ regex
+                        ++ ").*"
+                        |> Regex.fromString
+                        |> Maybe.map (prepareCommitMsg commitMsgFile rev)
+                        |> Maybe.withDefault ( Prep Nothing, printAndExitFailure "Invalid regex." )
 
 
-findAndWrite : String -> String -> Regex -> ( Model, Cmd Msg )
-findAndWrite commitMsgFile rev regex =
+prepareCommitMsg : String -> String -> Regex -> ( Model, Cmd Msg )
+prepareCommitMsg commitMsgFile rev regex =
     case Regex.findAtMost 1 regex rev of
         [] ->
-            ( Nothing, print "Branch name did not match regex, omitting." )
+            ( Prep Nothing, print "Branch name did not match regex, omitting." )
 
         match :: _ ->
             List.head match.submatches
                 |> Maybe.andThen identity
-                |> Maybe.map (\t -> ( Just t, readFile commitMsgFile ))
-                |> Maybe.withDefault ( Nothing, printAndExitSuccess "Branch name did not match regex, omitting." )
-
-
-readFile : String -> Cmd Msg
-readFile filename =
-    os
-        { commandType = "readFile"
-        , args =
-            JE.object
-                [ ( "filename", JE.string filename ) ]
-        }
-
-
-writeFile : String -> String -> String -> Cmd Msg
-writeFile ticketId filename text =
-    os
-        { commandType = "writeFile"
-        , args =
-            JE.object
-                [ ( "filename", JE.string filename )
-                , ( "text", JE.string <| ticketId ++ ":" ++ text )
-                ]
-        }
+                |> Maybe.map (\t -> ( Prep <| Just t, readFile commitMsgFile ))
+                |> Maybe.withDefault ( Prep Nothing, printAndExitSuccess "Branch name did not match regex, omitting." )
 
 
 errorString : String -> String
@@ -201,5 +219,5 @@ main =
         , init = init
         , config = program
         , update = update
-        , subscriptions = \_ -> osResult FromOS
+        , subscriptions = \_ -> fromJS FromJS
         }

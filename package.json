@@ -11,12 +11,13 @@
     "elm-format": "^0.8.5",
     "elm-test": "^0.19.1-revision7",
     "elm-webpack-loader": "^8.0.0",
+    "husky": "^6.0.0",
     "webpack": "^5.37.1",
     "webpack-cli": "^4.7.0"
   },
   "scripts": {
-    "start": "webpack build && node ./dist/main.js",
-    "build:dev": "webpack --mode=development",
+    "start": "yarn run build:dev && node ./dist/elm-git-hooks",
+    "build:dev": "webpack --mode=development && chmod +x ./dist/elm-git-hooks",
     "build:prod": "webpack --mode=production && chmod +x ./dist/elm-git-hooks"
   },
   "dependencies": {},
@@ -27,6 +28,6 @@
     "access": "public"
   },
   "files": [
-      "./dist/elm-git-hooks"
+    "./dist/elm-git-hooks"
   ]
 }
